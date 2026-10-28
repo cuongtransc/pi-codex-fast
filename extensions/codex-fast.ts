@@ -3,29 +3,17 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+import {
+	FAST_MODELS,
+	modelsFromSettings,
+	serviceTierFor,
+	SPEED_MODE,
+	type SpeedMode,
+	ULTRAFAST_MODELS,
+} from "../lib/speed-tier.ts";
+
 const STATUS_KEY = "fast-priority";
 const SETTINGS_KEY = "pi-codex-fast";
-const FAST_MODELS = [
-	"gpt-5.4",
-	"gpt-5.5",
-	"gpt-5.6-sol",
-	"gpt-5.6-terra",
-	"gpt-5.6-luna",
-	"gpt-6-astra",
-	"gpt-6-sol",
-	"gpt-6-luna",
-	"gpt-6.1-sol",
-].flatMap((model) => [`openai/${model}`, `openai-codex/${model}`]);
-const ULTRAFAST_MODELS = [
-	"openai/gpt-5.6-sol",
-	"openai/gpt-6-astra",
-	"openai-codex/gpt-6-astra",
-	"openai/gpt-6.1-sol",
-	"openai-codex/gpt-6.1-sol",
-];
-
-const SPEED_MODE = { OFF: "off", FAST: "fast", ULTRAFAST: "ultrafast" } as const;
-type SpeedMode = (typeof SPEED_MODE)[keyof typeof SPEED_MODE];
 
 function currentModelName(ctx: ExtensionContext): string | undefined {
 	return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
@@ -70,10 +58,15 @@ function speedModeFromSettings(settings: Record<string, unknown>): SpeedMode | u
 	return legacyEnabled ? SPEED_MODE.FAST : SPEED_MODE.OFF;
 }
 
-async function loadPersistedSpeedMode(cwd: string): Promise<SpeedMode | undefined> {
-	const globalMode = speedModeFromSettings(await readSettings(globalSettingsPath()));
-	const projectMode = speedModeFromSettings(await readSettings(projectSettingsPath(cwd)));
-	return projectMode ?? globalMode;
+async function loadPersistedSpeedMode(cwd: string): Promise<{ mode: SpeedMode | undefined; models: string[] | undefined }> {
+	const globalSettings = await readSettings(globalSettingsPath());
+	const projectSettings = await readSettings(projectSettingsPath(cwd));
+	const globalModels = modelsFromSettings(asObject(globalSettings[SETTINGS_KEY]));
+	const projectModels = modelsFromSettings(asObject(projectSettings[SETTINGS_KEY]));
+	return {
+		mode: speedModeFromSettings(projectSettings) ?? speedModeFromSettings(globalSettings),
+		models: projectModels ?? globalModels,
+	};
 }
 
 async function persistSpeedMode(mode: SpeedMode): Promise<void> {
@@ -91,6 +84,7 @@ async function persistSpeedMode(mode: SpeedMode): Promise<void> {
 
 export default function codexFastExtension(pi: ExtensionAPI): void {
 	let speedMode: SpeedMode = SPEED_MODE.OFF;
+	let allowedModels: string[] | undefined;
 	let settingsWriteQueue: Promise<void> = Promise.resolve();
 
 	function persistState(mode: SpeedMode, ctx: ExtensionContext): void {
@@ -130,6 +124,10 @@ export default function codexFastExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
+		if (modelLabel.startsWith("alias/")) {
+			ctx.ui.notify(`${modeLabel} mode enabled (${modelLabel}): applies to each supported model the alias resolves to.`, "info");
+			return;
+		}
 		ctx.ui.notify(`${modeLabel} mode enabled but inactive (${modelLabel}).`, "info");
 	}
 
@@ -146,10 +144,12 @@ export default function codexFastExtension(pi: ExtensionAPI): void {
 
 	async function reloadSpeedModeState(ctx: ExtensionContext, options?: { includeStartupFlag?: boolean }): Promise<void> {
 		speedMode = SPEED_MODE.OFF;
+		allowedModels = undefined;
 
 		try {
-			const persistedMode = await loadPersistedSpeedMode(ctx.cwd);
-			if (persistedMode !== undefined) speedMode = persistedMode;
+			const persisted = await loadPersistedSpeedMode(ctx.cwd);
+			if (persisted.mode !== undefined) speedMode = persisted.mode;
+			allowedModels = persisted.models;
 		} catch (error) {
 			if (ctx.hasUI) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -206,13 +206,18 @@ export default function codexFastExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		if (speedMode === SPEED_MODE.OFF || !supportsSpeedMode(ctx, speedMode)) return;
+		if (speedMode === SPEED_MODE.OFF) return;
 		const payload = asObject(event.payload);
 		if (payload === null) return;
-
-		return {
-			...payload,
-			service_tier: speedMode === SPEED_MODE.FAST ? "priority" : SPEED_MODE.ULTRAFAST,
-		};
+		// ctx.model is the session model: an alias under pi-model-fallback-alias, so the
+		// concrete target is read from the request's own `model` field as well.
+		const tier = serviceTierFor({
+			mode: speedMode,
+			sessionModel: currentModelName(ctx),
+			payloadModel: payload.model,
+			models: allowedModels,
+		});
+		if (tier === undefined) return;
+		return { ...payload, service_tier: tier };
 	});
 }

@@ -22,6 +22,25 @@ You cannot enable both modes at the same time.
 `--no-fast` overrides saved settings, `--fast`, and `--ultrafast`.
 CLI flags do not change saved settings.
 
+
+## Model aliases and the models allowlist
+
+With an alias extension such as `pi-model-fallback-alias`, the session model is an alias
+(`alias/high-model`), not the OpenAI model it resolves to. The tier is therefore decided on the
+request's own `model` field as well, so a request that an alias routes to a supported model gets
+the tier, and a request routed to another provider does not.
+
+`pi-codex-fast.models` limits the tier to some models (bare ids or `provider/id`); the global
+settings file and the project file are read the same way as `mode`, the project list winning:
+
+```json
+{ "pi-codex-fast": { "mode": "fast", "models": ["gpt-6.1-sol", "gpt-6-luna"] } }
+```
+
+Without `models`, every supported model gets the tier, as before.
+
+Tests: `npm test` (Node 24 runs the TypeScript directly).
+
 ## Persistence
 
 The extension reads the mode from these pi settings files:
