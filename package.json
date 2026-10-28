@@ -11,9 +11,13 @@
   "files": [
     "README.md",
     "assets/",
-    "extensions/"
+    "extensions/",
+    "lib/"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --test test/"
   }
 }
